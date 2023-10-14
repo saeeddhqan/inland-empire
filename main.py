@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
 import wandb, argparse, time, random, math, numpy, re
-import emb as model
+import model
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
 
@@ -68,7 +68,7 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'pos': 'learnable', # rope, dynamic, learnable
+	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 1,
 }
 
@@ -451,7 +451,6 @@ class ManageModel:
 
 			# If it's the right time to test the model
 			if epoch % config.eval_step == config.eval_step - 1:
-				config.mode = 'inference'
 				self.test(epoch)
 				if config.save_checkpoint or self.loss['test'] < self.best_loss:
 					self.best_loss = self.loss['test']
@@ -463,7 +462,7 @@ class ManageModel:
 						'test_loss': self.loss['test'],
 						'epoch': epoch,
 						}, self.path_format + f"_{epoch}.pt")
-				config.mode = 'train'
+
 			epoch += 1
 
 			if epoch > config.iterations:
