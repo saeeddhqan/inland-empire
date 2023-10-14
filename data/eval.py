@@ -8,12 +8,15 @@ cnt = Counter(a.split(' '))
 chars = sorted(list(set(a)))
 top15k = [x[0] for x in cnt.most_common(20000)]
 stoi = {top15k[x]: x for x in range(len(top15k))}
+for x in range(len(chars)):
+	c = chars[x]
+	if c not in stoi:
+		print(len(stoi), c)
+		stoi[c] = len(stoi)
 itos = {i:c for c,i in stoi.items()}
-stoi_char = {chars[x]: x + 20000 for x in range(len(chars))}
-itos_char = {i:c for c,i in stoi_char.items()}
 
 encode = lambda s: [stoi[x] for x in s]
-decode = lambda s: ''.join([(itos[x.item()] if x < 20000 else itos_char[x.item()]) for x in s])
+decode = lambda s: ''.join([itos[x.item()] for x in s])
 
 
 def encode():
@@ -29,8 +32,10 @@ def encode():
 				seq.append(stoi[token])
 			else:
 				for c in token:
-					seq.append(stoi_char[c])
-			seq.append(stoi_char[' '])
+					seq.append(stoi[c])
+			seq.append(stoi[' '])
+
+		seq.append(stoi['\n'])
 	numpy.save('pol20k.npy', numpy.array(seq))
 
 encode()

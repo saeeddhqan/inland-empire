@@ -16,15 +16,17 @@ class Data:
 
 		chars = sorted(list(set(text)))
 		topk = [x[0] for x in Counter(text.split(' ')).most_common(20000)]
-		self.vocab_size = len(topk) + len(chars)
-		config.vocab_size = self.vocab_size
 		self.stoi = {topk[x]: x for x in range(len(topk))}
-		self.stoi.update({chars[x]: x + 20000 for x in range(len(chars))})
+		for x in range(len(chars)):
+			c = chars[x]
+			if c not in self.stoi:
+				self.stoi[c] = len(self.stoi)
 		self.itos = {i:c for c,i in self.stoi.items()}
-
 		self.encode = lambda s: [self.stoi[x] for x in s]
 		self.decode = lambda s: ''.join([(self.itos[x]) for x in s])
 
+		self.vocab_size = len(self.stoi)
+		config.vocab_size = self.vocab_size
 		data = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
