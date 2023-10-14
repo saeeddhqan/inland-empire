@@ -13,10 +13,14 @@ class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
 		with open(config.data_file) as fp:
 			text = fp.read()
+		with open(config.data_file.split('.')[0] + '_pos.txt') as fp:
+			text_pos = fp.read()
 
 		chars = sorted(list(set(text)))
+		poss = sorted(list(set(text_pos.split())))
 		topk = [x[0] for x in Counter(text.split(' ')).most_common(20000)]
 		self.stoi = {topk[x]: x for x in range(len(topk))}
+		self.ptoi = {i:x for x,i in enumerate(poss)}
 		for x in range(len(chars)):
 			c = chars[x]
 			if c not in self.stoi:
@@ -28,9 +32,12 @@ class Data:
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
 		data = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
+		data_pos = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
+		self.train_data_pos = data_pos[:train_split]
 		self.test_data = data[train_split:]
+		self.test_data_pos = data_pos[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
 
@@ -48,10 +55,16 @@ class Data:
 		batch_size = self.batch_size if batch_size == -1 else batch_size
 
 		data = self.train_data if split == 'train' else self.test_data
+		data_pos = self.train_data_pos if split == 'train' else self.test_data_pos
 		ix = torch.randint(len(data) - block_size, (batch_size,))
+		p = torch.stack([data_pos[i:i + block_size] for i in ix])
 		x = torch.stack([data[i:i + block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
-		return x.pin_memory().to(config.device, non_blocking=True), y.pin_memory().to(config.device, non_blocking=True)
+		return (x.pin_memory().to(config.device, non_blocking=True),
+				y.pin_memory().to(config.device, non_blocking=True),
+				p.pin_memory().to(config.device, non_blocking=True),
+		)
+
 
 
 class RMSNorm(nn.Module):
@@ -298,13 +311,14 @@ class Transformer(nn.Module):
 		self.ngroups = config.ngroups
 		self.pos_win = config.pos_win
 		self.dim_snip = self.dim // self.pos_win
-
+		self.eps_dim = self.dim // config.nheads
 		if self.pos_method == 'rope':
 			self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2) # double for making it dynamism
 
 		self.stack = nn.ModuleDict(dict(
-			tok_embs=nn.Embedding(config.vocab_size, self.dim),
-			pos_embs=nn.Embedding(config.block_size, self.dim) if self.pos_method == 'learnable' else None,
+			tok_embs=nn.Embedding(config.vocab_size, self.dim - self.eps_dim),
+			eps_embs=nn.Embedding(config.vocab_size, self.eps_dim),
+			pos_embs=nn.Embedding(config.block_size, self.dim - self.eps_dim) if self.pos_method == 'learnable' else None,
 			dropout=nn.Dropout(config.dropout),
 			dropout_pos=nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None,
 			ln1=RMSNorm(self.dim),
@@ -313,7 +327,7 @@ class Transformer(nn.Module):
 
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
-		self.stack.tok_embs.weight = self.stack.lm_head.weight
+		# self.stack.tok_embs.weight = self.stack.lm_head.weight # there's no weight tying once we use eps embs
 
 		self.apply(self.norm_weights)
 		if config.deepnorm:
@@ -368,12 +382,15 @@ class Transformer(nn.Module):
 
 	def forward(self, 
 		seq: Tensor,
+		seq_pos: Tensor,
 		targets: Union[Tensor, None] = None,
 	) -> tuple[Tensor, Tensor]:
 
 		B, T = seq.shape
 		x = self.stack.tok_embs(seq) # (B,T,C)
-
+		p = self.stack.eps_embs(seq_pos) # (B,T,C)
+		x = torch.cat((x, p), dim=2)
+		del seq_pos, p
 		# Dynamic pos embedding
 		if self.pos_method == 'dynamic':
 			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
@@ -411,6 +428,7 @@ class Transformer(nn.Module):
 
 	def autocomplete(self, 
 		idx: Tensor,
+		P: Tensor,
 		_len: int = 10,
 		temperature: float = 1.0,
 		top_k: int = None,
@@ -419,7 +437,7 @@ class Transformer(nn.Module):
 		bsize = config.block_size
 		for _ in range(_len):
 			idx_cond = idx if idx.size(1) <= bsize else idx[:, -bsize:]
-			logits, _ = self(idx_cond)
+			logits, _ = self(idx_cond, P)
 			logits = logits / temperature
 			probs = F.softmax(logits, dim=-1)
 			if top_k is not None:

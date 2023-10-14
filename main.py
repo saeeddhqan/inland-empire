@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
 import wandb, argparse, time, random, math, numpy, re
-import model
+import emb as model
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
 
@@ -362,9 +362,9 @@ class ManageModel:
 			# A tensor to capture the losses
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
-				X, y = config.data_load.get_batch(0, split, block_size=length)
+				X, Y, P = config.data_load.get_batch(0, split, block_size=length)
 				with config.autocast:
-					_, loss = self.model(X, y)
+					_, loss = self.model(X, P, Y)
 				losses[k] = loss.item()
 			out[split] = losses.mean()
 
@@ -384,11 +384,11 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
-		print(seq)
-		print('-' * 10)
-		print(f"[{epoch}] > Elapsed: {elapsed}")
-		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+		# seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
+		# print(seq)
+		# print('-' * 10)
+		# print(f"[{epoch}] > Elapsed: {elapsed}")
+		# print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
 		self.loss = self.calculate_loss(config.block_size)
 		test_loss = round(self.loss['test'].item(), 4)
 		train_loss = round(self.loss['train'].item(), 4)
@@ -418,7 +418,7 @@ class ManageModel:
 				specifies whether the training should continue or not.
 		'''
 		epoch = 0
-		X, Y = config.data_load.get_batch(epoch)
+		X, Y, P = config.data_load.get_batch(epoch)
 		while True:
 			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
 
@@ -429,10 +429,10 @@ class ManageModel:
 			start = time.time()
 			for accum_step in range(config.accumulation_steps):
 				with config.autocast:
-					pred, loss = self.model(X, Y)
+					pred, loss = self.model(X, P, Y)
 					loss = loss / config.accumulation_steps
 
-				X, Y = config.data_load.get_batch(epoch)
+				X, Y, P = config.data_load.get_batch(epoch)
 				self.scaler.scale(loss).backward()
 
 
@@ -504,12 +504,12 @@ class ManageModel:
 		'''
 		self.pre_test()
 
-		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
+		X, P, _ = config.data_load.get_batch(0, 'test', batch_size=1)
 
 		start = time.time()
 
 		with config.autocast:
-			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
+			generated = self.model.autocomplete(X, P, seq_len, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
