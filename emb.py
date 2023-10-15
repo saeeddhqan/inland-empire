@@ -27,7 +27,7 @@ class Data:
 				self.stoi[c] = len(self.stoi)
 		self.itos = {i:c for c,i in self.stoi.items()}
 		self.encode = lambda s: [self.stoi[x] for x in s]
-		self.decode = lambda s: ''.join([(self.itos[x]) for x in s])
+		# self.decode = lambda s: ''.join([(self.itos[x]) for x in s])
 
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
@@ -40,6 +40,24 @@ class Data:
 		self.test_data_pos = data_pos[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
+
+
+	def decode(self, seq):
+		out = []
+		begin = 0
+		for x in seq:
+			x = x.item()
+			if x != space:
+				out.append(self.itos[x])
+				if begin == 0:
+					out.append(' ')
+			else:
+				if begin == 0:
+					begin = 1
+				else:
+					begin = 0
+					out.append(' ')
+		return ''.join(out)
 
 
 	def __len__(self) -> int:
