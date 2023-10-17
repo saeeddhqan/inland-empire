@@ -70,14 +70,11 @@ class Data:
 		batch_size = self.batch_size if batch_size == -1 else batch_size
 
 		data = self.train_data if split == 'train' else self.test_data
-		data_pos = self.train_data_pos if split == 'train' else self.test_data_pos
 		ix = torch.randint(len(data) - block_size, (batch_size,))
-		p = torch.stack([data_pos[i:i + block_size] for i in ix])
 		x = torch.stack([data[i:i + block_size] for i in ix])
 		y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
 		return (x.pin_memory().to(config.device, non_blocking=True),
 				y.pin_memory().to(config.device, non_blocking=True),
-				p.pin_memory().to(config.device, non_blocking=True),
 		)
 
 
