@@ -17,7 +17,7 @@ class Data:
 			text = fp.read()
 
 		chars = sorted(list(set(text)))
-		topk = [x[0] for x in Counter(text.split(' ')).most_common(20000)]
+		topk = [x[0] for x in Counter(text.split(' ')).most_common(15000)]
 		self.stoi = {topk[x]: x for x in range(len(topk))}
 		for x in range(len(chars)):
 			c = chars[x]
