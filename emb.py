@@ -347,7 +347,7 @@ class Transformer(nn.Module):
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
 		self.stack.tok_embs.weight = self.stack.lm_head.weight # there's no weight tying once we use eps embs
-		self.pos_coef = nn.Parameters(torch.tensor(data=1.0))
+		self.pos_coef = nn.Parameter(torch.tensor(data=1.0))
 
 		self.apply(self.norm_weights)
 		if config.deepnorm:
