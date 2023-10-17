@@ -407,7 +407,7 @@ class Transformer(nn.Module):
 	def forward(self, 
 		seq: Tensor,
 		targets: Optional[Tensor] = None,
-		get_embs: Optional(bool) = False,
+		get_embs: Optional[bool] = False,
 	) -> tuple[Tensor, Tensor]:
 
 		B, T = seq.shape
