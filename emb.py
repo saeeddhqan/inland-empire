@@ -30,12 +30,12 @@ class Data:
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
 		self.data = torch.from_numpy(numpy.load('data/politic_50k.npy')).to(torch.long)
-		train_split = int(0.9 * len(data))
-		self.train_data = data[:train_split]
-		self.test_data = data[train_split:]
+		train_split = int(0.9 * len(self.data))
+		self.train_data = self.data[:train_split]
+		self.test_data = self.data[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
-		self.doc_splits = torch.where(data == self.stoi['\n'])[0]
+		self.doc_splits = torch.where(self.data == self.stoi['\n'])[0]
 		self.num_docs = len(self.doc_splits)
 
 
