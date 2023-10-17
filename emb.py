@@ -43,7 +43,7 @@ class Data:
 		out = []
 		begin = 0
 		for x in seq:
-			x = x.item()
+			x = x
 			if x != space:
 				out.append(self.itos[x])
 				if begin == 0:
