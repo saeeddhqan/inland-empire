@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 data/politic_50k.npy
+workdir
+runs
+doc_graphs/
 # C extensions
 *.so
 

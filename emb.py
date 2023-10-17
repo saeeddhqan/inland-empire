@@ -2,7 +2,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
-from torch_geometric.nn import GATv2Conv
+from torch_geometric.nn import GATv2Conv, global_mean_pool
 
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
 from collections import Counter
@@ -24,38 +24,36 @@ class Data:
 			if c not in self.stoi:
 				self.stoi[c] = len(self.stoi)
 		self.itos = {i:c for c,i in self.stoi.items()}
-		self.encode = lambda s: [self.stoi[x] for x in s]
 		self.decode = lambda s: ''.join([self.itos[x] for x in s])
 
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
 		self.data = torch.from_numpy(numpy.load('data/politic_50k.npy')).to(torch.long)
-		train_split = int(0.9 * len(self.data))
-		self.train_data = self.data[:train_split]
+		self.docs = torch.from_numpy(numpy.load('data/politic_1k.npy')).to(torch.long)
+		train_split = int(0.95 * len(self.data))
+		self.train_data = torch.cat((self.data[:train_split], self.docs))
 		self.test_data = self.data[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
-		self.doc_splits = torch.where(self.data == self.stoi['\n'])[0]
-		self.num_docs = len(self.doc_splits)
-
-
-	# def decode(self, seq):
-	# 	out = []
-	# 	begin = 0
-	# 	space = self.stoi[' ']
-	# 	for x in seq:
-	# 		if x != space:
-	# 			out.append(self.itos[x])
-	# 			if begin == 0:
-	# 				out.append(' ')
-	# 		else:
-	# 			begin = 0 if begin == 1 else 1
-	# 			out.append(' ')
-	# 	return ''.join(out)
+		self.doc_splits = torch.where(self.docs == self.stoi['\n'])[0]
+		self.num_docs = len(self.doc_splits) - 1
 
 
 	def __len__(self) -> int:
 		return self.vocab_size
+
+
+	def encode(self, seq: list) -> list:
+		s = [self.stoi['\n']]
+		for token in seq.split():
+			if token in self.stoi:
+				s.append(self.stoi[token])
+			else:
+				for c in token:
+					s.append(self.stoi[c])
+			s.append(self.stoi[' '])
+
+		return s[:-1]
 
 
 	def get_batch(self, 
@@ -78,8 +76,8 @@ class Data:
 	def get_doc(self,
 		idx: int,
 	) -> Tensor:
-		doc = self.data[self.doc_splits[idx]:self.doc_splits[idx + 1]]
-		return doc
+		doc = self.docs[self.doc_splits[idx]:self.doc_splits[idx + 1]]
+		return doc.pin_memory().to(config.device, non_blocking=True)
 
 
 class RMSNorm(nn.Module):
@@ -424,7 +422,7 @@ class Transformer(nn.Module):
 			x, y = block(x, y, freqs_cis=freqs_cis)
 
 		if get_embs:
-			return self.stack.ln1(x)
+			return self.stack.ln1(x)[:,-1].unsqueeze(0)
 
 		if targets is None:
 			x = x[:,-1]
@@ -440,6 +438,33 @@ class Transformer(nn.Module):
 			loss = F.cross_entropy(logits, targets.flatten())
 
 		return logits, loss
+
+	def forward_node(self,
+		nodes: Tensor,
+	) -> Tensor:
+		B, T, C = nodes.shape
+		x = nodes
+		# Dynamic pos embedding
+		if self.pos_method == 'dynamic':
+			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
+			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
+			pos_emb = self.stack.dropout_pos(
+				pos_emb.unfold(1, self.dim, self.dim_snip) * self.pos_coef,
+			) # (B, T, C)
+			pos_emb[:,-1:,:] = 0 # remove pos embs of the last token. Not sure. https://arxiv.org/pdf/2006.15595.pdf
+		elif self.pos_method == 'learnable':
+			arange = torch.arange(T, device=seq.device)
+			pos_emb = self.stack.pos_embs(arange)
+
+		x = x + pos_emb if self.pos_method != 'rope' else x
+
+		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(seq.device)
+
+		y = None
+		for i, block in enumerate(self.blocks):
+			x, y = block(x, y, freqs_cis=freqs_cis)
+
+		return self.stack.ln1(x)
 
 
 	def autocomplete(self, 
@@ -463,29 +488,23 @@ class Transformer(nn.Module):
 		return idx
 
 
-
-
-
-
 class GAT(torch.nn.Module):
 	def __init__(self):
 		super().__init__()
 		self.dim = config.dim
 		self.nheads = config.nheads
-		self.gat1 = GATv2Conv(self.dim, self.dim * 2, heads=self.nheads)
-		self.gat2 = GATv2Conv(self.dim * 2 * self.nheads, self.dim, heads=self.nheads)
+		self.hidden_size = self.dim * 2
+		self.gat1 = GATv2Conv(self.dim, self.hidden_size, heads=self.nheads, edge_dim=1)
+		self.gat2 = GATv2Conv(self.hidden_size * self.nheads, self.dim // 2, heads=self.nheads, edge_dim=1)
 
 		self.linear = nn.Linear(self.dim, config.gnn_classes, bias=False)
 		self.emb_linear = nn.Linear(self.dim, self.dim)
 
-		self.ln1 = RMSNorm(self.dim)
+		self.ln1 = RMSNorm(self.hidden_size * 2)
 		self.ln2 = RMSNorm(self.dim)
+		self.ln3 = RMSNorm(self.dim)
 		self.apply(self.norm_weights)
 
-		self.criterion = torch.nn.CrossEntropyLoss()
-		self.optimizer = torch.optim.AdamW(self.parameters(),
-									  lr=config.gnn_classes,
-									  fused=config.device == 'cuda')
 
 	def norm_weights(self, module):
 		if isinstance(module, nn.Linear):
@@ -494,6 +513,11 @@ class GAT(torch.nn.Module):
 			else:
 				nn.init.xavier_uniform_(module.weight, gain=1 / math.sqrt(2))
 
+	def require(self):
+		self.criterion = torch.nn.CrossEntropyLoss()
+		self.optimizer = torch.optim.AdamW(self.parameters(),
+									  lr=config.gnn_lr,
+									  fused=config.device == 'cuda')
 
 	def forward(self, x, edge_index, edge_attr, inference=False):
 		x = F.dropout(x, p=config.dropout, training=self.training)
@@ -502,14 +526,17 @@ class GAT(torch.nn.Module):
 		x = F.dropout(x, p=config.dropout, training=self.training)
 		x = self.ln1(x)
 		x = self.gat2(x, edge_index, edge_attr=edge_attr)
+
 		# Readout layer
-		emb = self.ln2(self.emb_linear(global_mean_pool(x, batch)))  # [batch_size, self.dim]
 		if inference:
+			pool = global_mean_pool(x, None)
+			emb = self.ln2(self.emb_linear(pool))  # (B, self.dim)
 			return emb
 		# Apply a final classifier
-		x = F.dropout(emb, p=config.dropout, training=self.training)
+		x = F.dropout(x, p=config.dropout, training=self.training)
+		x = self.ln3(x)
 		x = self.linear(x)
-		x = self.silu(x)
+		# x = F.silu(x)
 		return x
 
 
@@ -520,33 +547,37 @@ class GAT(torch.nn.Module):
 
 	def train_process(self, data, docid: int):
 		self.train()
-		for epoch in range(config.gnn_epoch+1):
-			out, _ = self(data.x, data.edge_index, data.edge_attr)
-			loss = self.criterion(out, data.y)
-			acc = accuracy(out.argmax(dim=1),
-						  data.y)
-			loss.backward()
+		datax = data.x
+		edge_index = data.edge_index
+		edge_attr = data.edge_attr
+		y = data.y
 
+		for epoch in range(config.gnn_epoch+1):
+			self.optimizer.zero_grad(set_to_none=True)
+			out = self(datax, edge_index, edge_attr)
+			loss = self.criterion(out, y)
+			loss.backward()
+			# print(f'[doc:{docid}][{epoch}] ', loss.item())
 			torch.nn.utils.clip_grad_norm_(
 				self.parameters(),
 				config.grad_clip,
 			)
 
 			self.optimizer.step()
-			self.optimizer.zero_grad(set_to_none=True)
-			print(f'[doc:{docid}][{epoch}] ', loss.item())
-		print(f'[doc:{docid}][{epoch}] ', self.test(data))
+			datax = datax.detach()
+			
+		print(f'[doc:{docid}][test] ', self.test(data))
 
 
 	@torch.no_grad()
 	def test(self, data):
 		self.eval()
-		out, _ = self(data.x, data.edge_index)
-		acc = accuracy(out.argmax(dim=1))
-		return acc
+		out = self(data.x, data.edge_index, data.edge_attr)
+		acc = self.accuracy(out.argmax(dim=1), data.y)
+		return acc.item()
 
 
 	def generate_aggregator(self, data):
 		self.eval()
-		_, emb = self(data.x, data.edge_index, inference=True)
+		emb = self(data.x, data.edge_index, data.edge_attr, inference=True)
 		return emb

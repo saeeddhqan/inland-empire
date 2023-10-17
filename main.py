@@ -53,6 +53,8 @@ params = {
 	'workdir': 'workdir',
 	'data_file': 'data/politic_50k.txt',
 	'load': '',
+	'loadgraph': '',
+	'query': '',
 	'action': 'train',
 	'mode': 'train',
 	'data_load': None,
@@ -72,10 +74,10 @@ params = {
 	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 1,
 	'emb_dir': 'doc_graphs',
-	'emb_block_size': 128,
+	'emb_block_size': 32,
 	'causality': True,
 	'gnn_classes': 12,
-	'gnn_lr': 1e-3,
+	'gnn_lr': 8e-4,
 	'gnn_epoch': 5,
 }
 
@@ -185,7 +187,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode')
+			'data_load', 'action', 'load', 'workdir', 'mode', 'emb_block_size', 'gnn_epoch', 'gnn_classes')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]
@@ -528,65 +530,129 @@ class ManageModel:
 		return decoded, took, took_per_token
 
 
-	@torch.no_grad()
-	def graph_generator(self) -> NoReturn:
+	def make_graph(self, doc: Tensor) -> dict:
 		'''
-			Generate a sequence with seq_len length and return it
-			along with time elapsed.
+			Create a graph from a document with synthetic edges.
 		'''
-		self.pre_test()
-		GAT = model.GAT()
+		# Create sequences and adjust their shapes
+		fix_batch = doc.size(0) // config.emb_block_size
 
-		for docid in range(config.data_load.num_docs - 1):
-			doc = config.data_load.get_doc(docid)
-			fix_batch = doc.size(0) // config.emb_block_size
+		if doc.size(0) <= config.emb_block_size:
+			full_batch = doc.view(1, -1)
+			remain_context = 0
+		else:
 			fix_context = (fix_batch * config.emb_block_size)
 			remain_context = doc.size(0) - fix_context
-			config.causality = True
+			full_batch = doc[:fix_context].view(fix_batch, -1)
+			remain_batch = doc[fix_context:].view(1, -1)
 
-			full_batch = doc[:fix_context].unsqueeze(0).view(1, fix_batch, -1)
-			remain_batch = doc[fix_context:].unsqueeze(0).view(1, 1, -1)
-			full_embs = self.model(full_batch, get_embs=True)[:,-1:]
-			remain_embs = self.model(remain_batch, get_embs=True)[:,-1:] # shape?
+		# Create embeddings for all sequences and concatenate the embeddings.
+		config.causality = True
+		full_embs = self.model(full_batch, get_embs=True)
+		if remain_context > 0:
+			remain_embs = self.model(remain_batch, get_embs=True)
+			full_embs = torch.cat((full_embs, remain_embs), dim=1)
+		config.causality = False
 
-			config.causality = False
-			embs = torch.cat((full_embs, remain_embs), dim=1)
-			embs = self.model(embs, get_embs=True) # context-aware chunks
+		# A round of communication. Not sure.
+		nodes = self.model.forward_node(full_embs) # context-aware chunks. NOTE:
+		# Score function to compute the similarity between nodes
+		euclidean_distances = torch.cdist(nodes, nodes)
+		# Normalizing edge weights so that the larger, the more similar two nodes are.
+		edges_norm = (1 - euclidean_distances / euclidean_distances.max(dim=2)[0].mT)[0]
+		# Proning some of the edges that their score is below than mean.
+		thresholds = edges_norm.mean(dim=0)
+		num_nodes = nodes.size(1)
 
-			euclidean_distances = torch.cdist(embs, embs)
-			thresholds = euclidean_distances.mean(dim=1)[0]
-			num_nodes = embs.size(1)
+		# Create edge list, edge attr, and y
+		edge_list = [[], []]
+		edge_attr = []
+		y = torch.arange(0, num_nodes)
+		if num_nodes > config.gnn_classes:
+			y[torch.where(y >= config.gnn_classes)[0]] = config.gnn_classes - 1
 
-			edge_list = [[], []]
-			edge_features = []
-			y = torch.arange(0, num_nodes)
-			if num_nodes > config.gnn_classes:
-				y[torch.where(y >= config.gnn_classes)[0]] = config.gnn_classes - 1
+		for i in range(num_nodes):
+			mean = thresholds[i]
+			for j in range(num_nodes):
+				distance = edges_norm[i, j]
+				if distance > mean and distance != 1: # removing self-edges
+					edge_list[0].append(i)
+					edge_list[1].append(j)
+					edge_attr.append([distance])
 
-			for i in range(num_nodes):
-				mean = thresholds[i]
-				for j in range(num_nodes):
-					distance = euclidean_distances[i, j]
-					if distance < mean and distance != 0:
-						edge_list[0].append(i)
-						edge_list[1].append(j)
-						edge_attr.append([distance])
+		graph = {'x': nodes[0],
+			'edge_index': torch.tensor(edge_list, dtype=torch.long),
+			'edge_attr': torch.tensor(edge_attr),
+			'y': y,
+		}
 
-			graph = {'x': embs,
-				'edge_index': torch.tensor(edge_list, dtype=torch.long),
-				'edge_attr': torch.tensor(edge_features),
-				'y': y,
-			}
+		return graph
 
-			data_instance = torch_geometric.data.Data(**graph)
+
+	def graph_generator(self) -> NoReturn:
+		'''
+			Iterate over all the documents, convert them into graph,
+			, create an embedding for each graph and save it.
+		'''
+		self.pre_test()
+		self.GAT = model.GAT().to(config.device)
+		self.GAT.require()
+		for docid in range(config.data_load.num_docs):
+			doc = config.data_load.get_doc(docid)
+			graph = self.make_graph(doc)
+			data_instance = torch_geometric.data.Data(**graph).to(config.device)
 			data_instance.validate()
-			GAT.train_process(data_instance, docid)
-			aggregator = GAT.generate_aggregator(data_instance)
+			# Message passing
+			self.GAT.train_process(data_instance, docid)
+			# Create the final representator.
+			aggregator = self.GAT.generate_aggregator(data_instance)
 			graph['aggregator'] = aggregator
+			graph['graph_id'] = docid
 			torch.save(graph, f'{config.emb_dir}/doc_{docid}.pt')
+		
+		torch.save({
+			'model': self.GAT.state_dict()
+		}, os.path.join(
+			config.workdir,
+			'model_GAT.pt',
+		))
 
 
+	def graph_search(self, model_path: str, query: str, scorer: Optional[str] = 'dot'):
+		'''
+			Given a message passing model path and a query, the model returns the 
+			most relevant documents to the query.
+		'''
+		self.pre_test()
+		checkpoint = torch.load(model_path)
+		self.GAT = model.GAT()
+		self.GAT.load_state_dict(checkpoint['model'])
+		self.GAT.to(config.device)
+		del checkpoint
 
+		self.GAT.eval()
+		encoded_query = torch.tensor(config.data_load.encode(query), dtype=torch.long).to(config.device)
+		get_graph = self.make_graph(encoded_query)
+		data_instance = torch_geometric.data.Data(**get_graph).to(config.device)
+		data_instance.validate()
+		representator = self.GAT.generate_aggregator(data_instance)
+		scores = []
+		for docid in range(config.data_load.num_docs):
+			load_doc = torch.load(f'{config.emb_dir}/doc_{docid}.pt')
+			if scorer == 'dot':
+				score = load_doc['aggregator'][0] @ representator[0]
+			else:
+				score = torch.cdist(load_doc['aggregator'][0], representator[0])
+			scores.append((docid, score))
+		scores.sort(key=lambda x: x[1], reverse=True if scorer == 'dot' else False)
+		top = scores[:15]
+		for result in top:
+			doc = config.data_load.get_doc(result[0])
+			decode = config.data_load.decode(doc.tolist())
+			print(f"DOC ID: {result[0]}")
+			print('-'*10)
+			print(decode)
+			print('-'*40)
 
 if __name__ == '__main__':
 	config = Config(params)
@@ -595,6 +661,8 @@ if __name__ == '__main__':
 	parser.add_argument('--device', type=str, default=config.device, help=f"device type, default {config.device}")
 	parser.add_argument('--workdir', type=str, default=config.workdir, help=f"directory to save models, default {config.device}")
 	parser.add_argument('--load', type=str, default=config.load, help='path to a model to start with')
+	parser.add_argument('--loadgraph', type=str, default=config.loadgraph, help='path to the message passing model')
+	parser.add_argument('--query', type=str, default=config.query, help='search query')
 	parser.add_argument('--data-file', type=str, default=config.data_file, help=f"input data file, default {config.data_file}")
 	parser.add_argument('--variation', '-v', type=str, default=config.variation, help=f"model variation, default {config.variation}")
 	parser.add_argument('--details', type=str, help=f"model details, default {config.details}")
@@ -633,7 +701,15 @@ if __name__ == '__main__':
 			config.mode = 'inference'
 			task.load_model(config.load)
 			task.graph_generator()
-		case 'train_graph2vec':
-			pass
+		case 'inference':
+			config.mode = 'inference'
+			if (config.load != '' and \
+				config.loadgraph != '' and \
+				config.query != ''
+			):
+				task.load_model(config.load)
+				task.graph_search(config.loadgraph, config.query)
+			else:
+				print('Provide all the necessary options.')
 		case _:
 			print('Invalid action.')
