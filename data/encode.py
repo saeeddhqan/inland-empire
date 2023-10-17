@@ -28,11 +28,8 @@ def decode(s):
 			if begin == 0:
 				out.append(' ')
 		else:
-			if begin == 0:
-				begin = 1
-			else:
-				begin = 0
-				out.append(' ')
+			begin = 0 if begin == 1 else 1
+			out.append(' ')
 	return ''.join(out)
 
 def create():

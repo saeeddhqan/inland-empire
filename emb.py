@@ -25,7 +25,6 @@ class Data:
 				self.stoi[c] = len(self.stoi)
 		self.itos = {i:c for c,i in self.stoi.items()}
 		self.encode = lambda s: [self.stoi[x] for x in s]
-		# self.decode = lambda s: ''.join([(self.itos[x]) for x in s])
 
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
@@ -44,17 +43,13 @@ class Data:
 		begin = 0
 		space = self.stoi[' ']
 		for x in seq:
-			x = x
 			if x != space:
 				out.append(self.itos[x])
 				if begin == 0:
 					out.append(' ')
 			else:
-				if begin == 0:
-					begin = 1
-				else:
-					begin = 0
-					out.append(' ')
+				begin = 0 if begin == 1 else 1
+				out.append(' ')
 		return ''.join(out)
 
 
