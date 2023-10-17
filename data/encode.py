@@ -3,7 +3,7 @@ import numpy
 import torch
 
 text = open('politic_50k.txt').read()
-# text2 = open('politic_1k.txt').read()
+text2 = open('politic_1k.txt').read()
 
 cnt = Counter(text.split(' '))
 chars = sorted(list(set(text)))
@@ -36,9 +36,9 @@ def decode(s):
 	return ''.join(out)
 
 def create():
-	seq = []
+	seq = [stoi['\n']]
 	mx = 0
-	for doc in text.split('\n'):
+	for doc in text2.split('\n'):
 		if doc == '':
 			continue
 

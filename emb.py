@@ -2,6 +2,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from torch_geometric.nn import GATv2Conv
+
 from typing import NoReturn, ClassVar, Union, Optional, Tuple
 from collections import Counter
 import math
@@ -31,15 +33,14 @@ class Data:
 
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
-		data = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
-		data_pos = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
+		self.data = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
-		self.train_data_pos = data_pos[:train_split]
 		self.test_data = data[train_split:]
-		self.test_data_pos = data_pos[train_split:]
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
+		self.doc_splits = torch.where(data == self.stoi['\n'])[0]
+		self.num_docs = len(self.doc_splits)
 
 
 	def decode(self, seq):
@@ -83,6 +84,12 @@ class Data:
 				p.pin_memory().to(config.device, non_blocking=True),
 		)
 
+
+	def get_doc(self,
+		idx: int,
+	) -> Tensor:
+		doc = self.data[self.doc_splits[idx]:self.doc_splits[idx + 1]]
+		return doc
 
 
 class RMSNorm(nn.Module):
@@ -175,7 +182,7 @@ class CausalSelfAttention(nn.Module):
 			y = torch.nn.functional.scaled_dot_product_attention(q, k, v, 
 				attn_mask=None,
 				dropout_p=self.dropout if self.training else 0,
-				is_causal=True,
+				is_causal=config.causality,
 			)
 		else:
 			att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -329,14 +336,12 @@ class Transformer(nn.Module):
 		self.ngroups = config.ngroups
 		self.pos_win = config.pos_win
 		self.dim_snip = self.dim // self.pos_win
-		self.eps_dim = self.dim // config.nheads
 		if self.pos_method == 'rope':
 			self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2) # double for making it dynamism
 
 		self.stack = nn.ModuleDict(dict(
-			tok_embs=nn.Embedding(config.vocab_size, self.dim - self.eps_dim),
-			eps_embs=nn.Embedding(config.vocab_size, self.eps_dim),
-			pos_embs=nn.Embedding(config.block_size, self.dim - self.eps_dim) if self.pos_method == 'learnable' else None,
+			tok_embs=nn.Embedding(config.vocab_size, self.dim),
+			pos_embs=nn.Embedding(config.block_size, self.dim) if self.pos_method == 'learnable' else None,
 			dropout=nn.Dropout(config.dropout),
 			dropout_pos=nn.Dropout(config.dropout_pos) if self.pos_method == 'dynamic' else None,
 			ln1=RMSNorm(self.dim),
@@ -345,7 +350,8 @@ class Transformer(nn.Module):
 
 		self.alpha = 1.0 if not config.deepnorm else math.pow(2.0 * config.nlayers, 0.25)
 		self.blocks = nn.ModuleList([Block(idx, self.alpha) for idx in range(config.nlayers)])
-		# self.stack.tok_embs.weight = self.stack.lm_head.weight # there's no weight tying once we use eps embs
+		self.stack.tok_embs.weight = self.stack.lm_head.weight # there's no weight tying once we use eps embs
+		self.pos_coef = nn.Parameters(torch.tensor(data=1.0))
 
 		self.apply(self.norm_weights)
 		if config.deepnorm:
@@ -400,22 +406,20 @@ class Transformer(nn.Module):
 
 	def forward(self, 
 		seq: Tensor,
-		seq_pos: Tensor,
-		targets: Union[Tensor, None] = None,
+		targets: Optional[Tensor] = None,
+		get_embs: Optional(bool) = False,
 	) -> tuple[Tensor, Tensor]:
 
 		B, T = seq.shape
 		x = self.stack.tok_embs(seq) # (B,T,C)
-		p = self.stack.eps_embs(seq_pos) # (B,T,C)
-		x = torch.cat((x, p), dim=2)
-		del seq_pos, p
 		# Dynamic pos embedding
 		if self.pos_method == 'dynamic':
 			pos_emb = x[:,:,:self.dim_snip].flatten(1) # (B, n)
 			pos_emb = F.pad(pos_emb, (self.dim - self.dim_snip, 0), value=0) # (B, n+)
 			pos_emb = self.stack.dropout_pos(
-				pos_emb.unfold(1, self.dim, self.dim_snip) * 0.5,
+				pos_emb.unfold(1, self.dim, self.dim_snip) * self.pos_coef,
 			) # (B, T, C)
+			pos_emb[:,-1:,:] = 0 # remove pos embs of the last token. Not sure. https://arxiv.org/pdf/2006.15595.pdf
 		elif self.pos_method == 'learnable':
 			arange = torch.arange(T, device=seq.device)
 			pos_emb = self.stack.pos_embs(arange)
@@ -429,10 +433,14 @@ class Transformer(nn.Module):
 		for i, block in enumerate(self.blocks):
 			x, y = block(x, y, freqs_cis=freqs_cis)
 
+		if get_embs:
+			return self.stack.ln1(x)
+
 		if targets is None:
 			x = x[:,-1]
 
 		x = self.stack.ln1(x)
+
 		logits = self.stack.lm_head(x) # (batch, block_size, vocab_size)
 
 		if targets is None:
@@ -446,7 +454,6 @@ class Transformer(nn.Module):
 
 	def autocomplete(self, 
 		idx: Tensor,
-		P: Tensor,
 		_len: int = 10,
 		temperature: float = 1.0,
 		top_k: int = None,
@@ -455,7 +462,7 @@ class Transformer(nn.Module):
 		bsize = config.block_size
 		for _ in range(_len):
 			idx_cond = idx if idx.size(1) <= bsize else idx[:, -bsize:]
-			logits, _ = self(idx_cond, P)
+			logits, _ = self(idx_cond)
 			logits = logits / temperature
 			probs = F.softmax(logits, dim=-1)
 			if top_k is not None:
@@ -464,3 +471,92 @@ class Transformer(nn.Module):
 			next_idx = torch.multinomial(probs, num_samples=1)
 			idx = torch.cat((idx, next_idx), dim=1)
 		return idx
+
+
+
+
+
+
+class GAT(torch.nn.Module):
+	def __init__(self):
+		super().__init__()
+		self.dim = config.dim
+		self.nheads = config.nheads
+		self.gat1 = GATv2Conv(self.dim, self.dim * 2, heads=self.nheads)
+		self.gat2 = GATv2Conv(self.dim * 2 * self.nheads, self.dim, heads=self.nheads)
+
+		self.linear = nn.Linear(self.dim, config.gnn_classes, bias=False)
+		self.emb_linear = nn.Linear(self.dim, self.dim)
+
+		self.ln1 = RMSNorm(self.dim)
+		self.ln2 = RMSNorm(self.dim)
+		self.apply(self.norm_weights)
+
+		self.criterion = torch.nn.CrossEntropyLoss()
+		self.optimizer = torch.optim.AdamW(self.parameters(),
+									  lr=config.gnn_classes,
+									  fused=config.device == 'cuda')
+
+	def norm_weights(self, module):
+		if isinstance(module, nn.Linear):
+			if config.init_weight == 'normal_':
+				nn.init.normal_(module.weight, mean=0.0, std=0.02)
+			else:
+				nn.init.xavier_uniform_(module.weight, gain=1 / math.sqrt(2))
+
+
+	def forward(self, x, edge_index, edge_attr, inference=False):
+		x = F.dropout(x, p=config.dropout, training=self.training)
+		x = self.gat1(x, edge_index, edge_attr=edge_attr)
+		x = F.silu(x)
+		x = F.dropout(x, p=config.dropout, training=self.training)
+		x = self.ln1(x)
+		x = self.gat2(x, edge_index, edge_attr=edge_attr)
+		# Readout layer
+		emb = self.ln2(self.emb_linear(global_mean_pool(x, batch)))  # [batch_size, self.dim]
+		if inference:
+			return emb
+		# Apply a final classifier
+		x = F.dropout(emb, p=config.dropout, training=self.training)
+		x = self.linear(x)
+		x = self.silu(x)
+		return x
+
+
+	def accuracy(self, y_pred, y_true):
+		"""Calculate accuracy."""
+		return torch.sum(y_pred == y_true) / len(y_true)
+
+
+	def train_process(self, data, docid: int):
+		self.train()
+		for epoch in range(config.gnn_epoch+1):
+			out, _ = self(data.x, data.edge_index, data.edge_attr)
+			loss = self.criterion(out, data.y)
+			acc = accuracy(out.argmax(dim=1),
+						  data.y)
+			loss.backward()
+
+			torch.nn.utils.clip_grad_norm_(
+				self.parameters(),
+				config.grad_clip,
+			)
+
+			self.optimizer.step()
+			self.optimizer.zero_grad(set_to_none=True)
+			print(f'[doc:{docid}][{epoch}] ', loss.item())
+		print(f'[doc:{docid}][{epoch}] ', self.test(data))
+
+
+	@torch.no_grad()
+	def test(self, data):
+		self.eval()
+		out, _ = self(data.x, data.edge_index)
+		acc = accuracy(out.argmax(dim=1))
+		return acc
+
+
+	def generate_aggregator(self, data):
+		self.eval()
+		_, emb = self(data.x, data.edge_index, inference=True)
+		return emb

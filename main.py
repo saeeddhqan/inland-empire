@@ -9,6 +9,7 @@ from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
 import wandb, argparse, time, random, math, numpy, re
 import emb as model
+import torch_geometric
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
 
@@ -70,6 +71,12 @@ params = {
 	'topk': -1,
 	'pos': 'dynamic', # rope, dynamic, learnable
 	'attention': 1,
+	'emb_dir': 'doc_graphs',
+	'emb_block_size': 128,
+	'causality': True,
+	'gnn_classes': 12,
+	'gnn_lr': 1e-3,
+	'gnn_epoch': 5,
 }
 
 
@@ -302,6 +309,7 @@ class ManageModel:
 			self.wandb_init.watch(self.model, log='all')
 
 		os.makedirs(config.workdir, exist_ok=True)
+		os.makedirs(config.emb_dir, exist_ok=True)
 		self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 
@@ -362,9 +370,9 @@ class ManageModel:
 			# A tensor to capture the losses
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
-				X, Y, P = config.data_load.get_batch(0, split, block_size=length)
+				X, Y = config.data_load.get_batch(0, split, block_size=length)
 				with config.autocast:
-					_, loss = self.model(X, P, Y)
+					_, loss = self.model(X, Y)
 				losses[k] = loss.item()
 			out[split] = losses.mean()
 
@@ -384,11 +392,11 @@ class ManageModel:
 		'''
 		state = config.mode
 		config.mode = 'inference'
-		# seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
-		# print(seq)
-		# print('-' * 10)
-		# print(f"[{epoch}] > Elapsed: {elapsed}")
-		# print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
+		seq, elapsed, elapsed_per_token = self.generator(epoch=epoch)
+		print(seq)
+		print('-' * 10)
+		print(f"[{epoch}] > Elapsed: {elapsed}")
+		print(f"[{epoch}] > Elapsed per character: {elapsed_per_token}")
 		self.loss = self.calculate_loss(config.block_size)
 		test_loss = round(self.loss['test'].item(), 4)
 		train_loss = round(self.loss['train'].item(), 4)
@@ -418,7 +426,7 @@ class ManageModel:
 				specifies whether the training should continue or not.
 		'''
 		epoch = 0
-		X, Y, P = config.data_load.get_batch(epoch)
+		X, Y = config.data_load.get_batch(epoch)
 		while True:
 			lr = self.get_lr(epoch + 1) if config.decay_lr else config.lr
 
@@ -429,10 +437,10 @@ class ManageModel:
 			start = time.time()
 			for accum_step in range(config.accumulation_steps):
 				with config.autocast:
-					pred, loss = self.model(X, P, Y)
+					pred, loss = self.model(X, Y)
 					loss = loss / config.accumulation_steps
 
-				X, Y, P = config.data_load.get_batch(epoch)
+				X, Y = config.data_load.get_batch(epoch)
 				self.scaler.scale(loss).backward()
 
 
@@ -504,12 +512,13 @@ class ManageModel:
 		'''
 		self.pre_test()
 
-		X, P, _ = config.data_load.get_batch(0, 'test', batch_size=1)
+
+		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
 
 		start = time.time()
 
 		with config.autocast:
-			generated = self.model.autocomplete(X, P, seq_len, top_k=config.topk)
+			generated = self.model.autocomplete(X, seq_len, top_k=config.topk)
 		end = time.time()
 		decoded = config.data_load.decode(generated[0].tolist())
 		took = end - start
@@ -517,6 +526,66 @@ class ManageModel:
 		self.post_test()
 
 		return decoded, took, took_per_token
+
+
+	@torch.no_grad()
+	def graph_generator(self) -> NoReturn:
+		'''
+			Generate a sequence with seq_len length and return it
+			along with time elapsed.
+		'''
+		self.pre_test()
+		GAT = model.GAT()
+
+		for docid in range(config.data_load.num_docs - 1):
+			doc = config.data_load.get_doc(docid)
+			fix_batch = doc.size(0) // config.emb_block_size
+			fix_context = (fix_batch * config.emb_block_size)
+			remain_context = doc.size(0) - fix_context
+			config.causality = True
+
+			full_batch = doc[:fix_context].unsqueeze(0).view(1, fix_batch, -1)
+			remain_batch = doc[fix_context:].unsqueeze(0).view(1, 1, -1)
+			full_embs = self.model(full_batch, get_embs=True)[:,-1:]
+			remain_embs = self.model(remain_batch, get_embs=True)[:,-1:] # shape?
+
+			config.causality = False
+			embs = torch.cat((full_embs, remain_embs), dim=1)
+			embs = self.model(embs, get_embs=True) # context-aware chunks
+
+			euclidean_distances = torch.cdist(embs, embs)
+			thresholds = euclidean_distances.mean(dim=1)[0]
+			num_nodes = embs.size(1)
+
+			edge_list = [[], []]
+			edge_features = []
+			y = torch.arange(0, num_nodes)
+			if num_nodes > config.gnn_classes:
+				y[torch.where(y >= config.gnn_classes)[0]] = config.gnn_classes - 1
+
+			for i in range(num_nodes):
+				mean = thresholds[i]
+				for j in range(num_nodes):
+					distance = euclidean_distances[i, j]
+					if distance < mean and distance != 0:
+						edge_list[0].append(i)
+						edge_list[1].append(j)
+						edge_attr.append([distance])
+
+			graph = {'x': embs,
+				'edge_index': torch.tensor(edge_list, dtype=torch.long),
+				'edge_attr': torch.tensor(edge_features),
+				'y': y,
+			}
+
+			data_instance = torch_geometric.data.Data(**graph)
+			data_instance.validate()
+			GAT.train_process(data_instance, docid)
+			aggregator = GAT.generate_aggregator(data_instance)
+			graph['aggregator'] = aggregator
+			torch.save(graph, f'{config.emb_dir}/doc_{docid}.pt')
+
+
 
 
 if __name__ == '__main__':
@@ -560,13 +629,11 @@ if __name__ == '__main__':
 				model = model.Transformer()
 				task.model = torch.compile(model) if config.compile else model
 			task.train()
-		case 'test':
+		case 'generate':
 			config.mode = 'inference'
 			task.load_model(config.load)
-			seq, elapsed, elapsed_per_token = task.generator(500)
-			print(seq)
-			print('-' * 12)
-			print('Elapsed:', elapsed)
-			print('Elapsed per character:', elapsed_per_token)
+			task.graph_generator()
+		case 'train_graph2vec':
+			pass
 		case _:
 			print('Invalid action.')
