@@ -51,7 +51,7 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/pol_clean.txt',
+	'data_file': 'data/politic_50k.txt',
 	'load': '',
 	'action': 'train',
 	'mode': 'train',

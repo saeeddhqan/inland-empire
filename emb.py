@@ -15,14 +15,10 @@ class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
 		with open(config.data_file) as fp:
 			text = fp.read()
-		with open(config.data_file.split('.')[0] + '_pos.txt') as fp:
-			text_pos = fp.read()
 
 		chars = sorted(list(set(text)))
-		poss = sorted(list(set(text_pos.split())))
 		topk = [x[0] for x in Counter(text.split(' ')).most_common(20000)]
 		self.stoi = {topk[x]: x for x in range(len(topk))}
-		self.ptoi = {i:x for x,i in enumerate(poss)}
 		for x in range(len(chars)):
 			c = chars[x]
 			if c not in self.stoi:
@@ -33,7 +29,7 @@ class Data:
 
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
-		self.data = torch.from_numpy(numpy.load('data/pol20k.npy')).to(torch.long)
+		self.data = torch.from_numpy(numpy.load('data/politic_50k.npy')).to(torch.long)
 		train_split = int(0.9 * len(data))
 		self.train_data = data[:train_split]
 		self.test_data = data[train_split:]
