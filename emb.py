@@ -42,6 +42,7 @@ class Data:
 	def decode(self, seq):
 		out = []
 		begin = 0
+		space = self.stoi[' ']
 		for x in seq:
 			x = x
 			if x != space:
