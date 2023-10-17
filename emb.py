@@ -25,6 +25,7 @@ class Data:
 				self.stoi[c] = len(self.stoi)
 		self.itos = {i:c for c,i in self.stoi.items()}
 		self.encode = lambda s: [self.stoi[x] for x in s]
+		self.decode = lambda s: ''.join([self.itos[x] for x in s])
 
 		self.vocab_size = len(self.stoi)
 		config.vocab_size = self.vocab_size
@@ -38,19 +39,19 @@ class Data:
 		self.num_docs = len(self.doc_splits)
 
 
-	def decode(self, seq):
-		out = []
-		begin = 0
-		space = self.stoi[' ']
-		for x in seq:
-			if x != space:
-				out.append(self.itos[x])
-				if begin == 0:
-					out.append(' ')
-			else:
-				begin = 0 if begin == 1 else 1
-				out.append(' ')
-		return ''.join(out)
+	# def decode(self, seq):
+	# 	out = []
+	# 	begin = 0
+	# 	space = self.stoi[' ']
+	# 	for x in seq:
+	# 		if x != space:
+	# 			out.append(self.itos[x])
+	# 			if begin == 0:
+	# 				out.append(' ')
+	# 		else:
+	# 			begin = 0 if begin == 1 else 1
+	# 			out.append(' ')
+	# 	return ''.join(out)
 
 
 	def __len__(self) -> int:
