@@ -3,7 +3,7 @@ import numpy
 import torch
 
 text = open('politic_50k.txt').read()
-text2 = open('politic_1k.txt').read()
+# text2 = open('politic_1k.txt').read()
 
 cnt = Counter(text.split(' '))
 chars = sorted(list(set(text)))
@@ -36,7 +36,7 @@ decode = lambda s: ''.join([itos[x.item()] for x in s])
 def create():
 	seq = [stoi['\n']]
 	mx = 0
-	for doc in text2.split('\n'):
+	for doc in text.split('\n'):
 		if doc == '':
 			continue
 
@@ -48,11 +48,11 @@ def create():
 					seq.append(stoi[c])
 			seq.append(stoi[' '])
 		seq.append(stoi['\n'])
-	numpy.save('politic_1k.npy', numpy.array(seq))
+	numpy.save('politic_50k.npy', numpy.array(seq))
 
 create()
 
-loaded_array = torch.from_numpy(numpy.load('politic_1k.npy'))
+loaded_array = torch.from_numpy(numpy.load('politic_50k.npy'))
 
 print(loaded_array.shape)
 print(decode(loaded_array[10:1000]))
