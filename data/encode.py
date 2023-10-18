@@ -1,4 +1,5 @@
 from transformers import AutoTokenizer 
+import torch
 
 model = 'mistralai/Mistral-7B-v0.1'
 tokenizer = AutoTokenizer.from_pretrained(model)
