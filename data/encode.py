@@ -1,45 +1,13 @@
-from collections import Counter
-import numpy
-import torch
+from transformers import AutoTokenizer 
 
-text = open('politic_50k.txt').read()
-text2 = open('politic_1k.txt').read()
+model = 'mistralai/Mistral-7B-v0.1'
+tokenizer = AutoTokenizer.from_pretrained(model)
 
-cnt = Counter(text.split(' '))
-chars = sorted(list(set(text)))
-top50k = [x[0] for x in cnt.most_common(15000)]
-stoi = {top50k[x]: x for x in range(len(top50k))}
+with open('politic4k.txt') as fp:
+	seq = torch.tensor(tokenizer.encode(fp.read())).to(torch.long)
+	torch.save(seq, 'politic4k.pt')
+	del seq
+with open('politic50k.txt') as fp:
+	seq = torch.tensor(tokenizer.encode(fp.read())).to(torch.long)
+	torch.save(seq, 'politic50k.pt')
 
-for x in range(len(chars)):
-	c = chars[x]
-	if c not in stoi:
-		stoi[c] = len(stoi)
-space = stoi[' ']
-itos = {i:c for c,i in stoi.items()}
-
-encode = lambda s: [stoi[x] for x in s]
-decode = lambda s: ''.join([itos[x.item()] for x in s])
-
-def create():
-	seq = [stoi['\n']]
-	mx = 0
-	for doc in text2.split('\n'):
-		if doc == '':
-			continue
-
-		for token in doc.split():
-			if token in stoi:
-				seq.append(stoi[token])
-			else:
-				for c in token:
-					seq.append(stoi[c])
-			seq.append(stoi[' '])
-		seq.append(stoi['\n'])
-	numpy.save('politic_1k.npy', numpy.array(seq))
-
-create()
-
-loaded_array = torch.from_numpy(numpy.load('politic_1k.npy'))
-
-print(loaded_array.shape)
-print(decode(loaded_array[10:1000]))
