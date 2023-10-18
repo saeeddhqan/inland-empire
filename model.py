@@ -28,7 +28,7 @@ class Data:
 		self.vocab_size = tokenizer.vocab_size
 		config.vocab_size = self.vocab_size
 
-		self.docs = torch.tensor(self.tokenizer.encode(text_docs)).to(torch.long)
+		self.docs = torch.tensor(self.tokenizer.encode(text_docs, add_special_tokens=False)).to(torch.long)
 		data = torch.tensor(self.tokenizer.encode(text)).to(torch.long)
 
 		line_id = 13 # adjust it based on the tokenizer
