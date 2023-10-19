@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
 import wandb, argparse, time, random, math, numpy, re
-import emb as model
+import model
 import torch_geometric
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
