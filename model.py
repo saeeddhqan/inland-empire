@@ -14,10 +14,12 @@ config = None
 
 class Data:
 	def __init__(self, config: ClassVar) -> NoReturn:
-		with open(config.data_file) as fp:
-			text = fp.read()
-		with open(config.docs_file) as fp:
-			text_docs = fp.read()
+		split = 4
+		data = torch.tensor([])
+		for chunk in range(split + 1):
+			data = torch.cat((data, torch.load(f'{config.data_file}_p{chunk}.pt')))
+		self.docs = torch.load(config.docs_file).to(torch.long)
+		data = data.to(torch.long)
 
 		model = 'mistralai/Mistral-7B-v0.1'
 		self.tokenizer = AutoTokenizer.from_pretrained(model)
@@ -28,18 +30,19 @@ class Data:
 		self.vocab_size = tokenizer.vocab_size
 		config.vocab_size = self.vocab_size
 
-		self.docs = torch.tensor(self.tokenizer.encode(text_docs, add_special_tokens=False)).to(torch.long)
-		data = torch.tensor(self.tokenizer.encode(text)).to(torch.long)
 
 		line_id = 13 # adjust it based on the tokenizer
 		train_split = int(0.9 * len(data))
 
-		self.train_data = torch.cat((data[:train_split], self.docs))
+		self.train_data = data[:train_split]
 		self.test_data = data[train_split:]
+
 		self.block_size = config.block_size
 		self.batch_size = config.batch_size
+
 		self.doc_splits = torch.where(self.docs == line_id)[0]
 		self.doc_splits = torch.cat((torch.tensor([0]), self.doc_splits))
+
 		self.num_docs = len(self.doc_splits) - 2
 
 
