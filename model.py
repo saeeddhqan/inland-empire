@@ -275,9 +275,10 @@ class NonLinear(nn.Module):
 		self.w2 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias)
 		self.w3 = nn.Linear(4 * self.dim, self.dim, bias=config.bias)
 		self.dropout = nn.Dropout(config.dropout)
+		self.slope = nn.Parameter(torch.tensor(data=0.0))
 
 	def forward(self, x: Tensor):
-		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+		return self.dropout(self.w3(F.leaky_relu(self.w1(x), negative_slope=self.slope) * self.w2(x)))
 
 
 class Block(nn.Module):
