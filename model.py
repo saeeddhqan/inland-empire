@@ -314,13 +314,15 @@ class Transformer(nn.Module):
 		super().__init__()
 		self.dim = config.dim
 		self.pos_method = config.pos
-		self.freqs_cis = None
+
 		self.ngroups = config.ngroups
 		self.pos_win = config.pos_win
 		self.dim_snip = self.dim // self.pos_win
 		if self.pos_method == 'rope':
 			# self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2) # double for making it dynamism
 			self.register_buffer('freqs_cis', precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2))
+		else:
+			self.freqs_cis = None
 
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
