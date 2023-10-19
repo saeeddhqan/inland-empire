@@ -72,7 +72,7 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'pos': 'dynamic', # rope, dynamic, learnable
+	'pos': 'rope', # rope, dynamic, learnable
 	'attention': 1,
 	'emb_dir': 'doc_graphs',
 	'emb_block_size': 32,
