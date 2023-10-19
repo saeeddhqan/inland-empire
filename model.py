@@ -275,10 +275,9 @@ class NonLinear(nn.Module):
 		self.w2 = nn.Linear(self.dim, 4 * self.dim, bias=config.bias)
 		self.w3 = nn.Linear(4 * self.dim, self.dim, bias=config.bias)
 		self.dropout = nn.Dropout(config.dropout)
-		self.slope = nn.Parameter(torch.tensor(data=0.0))
 
 	def forward(self, x: Tensor):
-		return self.dropout(self.w3(F.leaky_relu(self.w1(x), negative_slope=self.slope) * self.w2(x)))
+		return self.dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
 
 
 class Block(nn.Module):
@@ -306,7 +305,7 @@ class Block(nn.Module):
 
 		head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis=freqs_cis)
 		head_out = x + head_out
-		hidden_state = head_out + self.alpha * self.ffn(self.ln2(head_out))
+		hidden_state = head_out + self.ffn(self.ln2(head_out))
 		return hidden_state, y
 
 
@@ -320,7 +319,8 @@ class Transformer(nn.Module):
 		self.pos_win = config.pos_win
 		self.dim_snip = self.dim // self.pos_win
 		if self.pos_method == 'rope':
-			self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2) # double for making it dynamism
+			# self.freqs_cis = precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2) # double for making it dynamism
+			self.register_buffer('freqs_cis', precompute_freqs_cis(self.dim // config.nheads, config.block_size * 2))
 
 		self.stack = nn.ModuleDict(dict(
 			tok_embs=nn.Embedding(config.vocab_size, self.dim),
@@ -446,14 +446,14 @@ class Transformer(nn.Module):
 			pos_emb = self.stack.dropout_pos(
 				pos_emb.unfold(1, self.dim, self.dim_snip) * self.pos_coef,
 			) # (B, T, C)
-			pos_emb[:,-1:,:] = 0 # remove pos embs of the last token. Not sure. https://arxiv.org/pdf/2006.15595.pdf
+			# pos_emb[:,-1:,:] = 0 # remove pos embs of the last token. Not sure. https://arxiv.org/pdf/2006.15595.pdf
 		elif self.pos_method == 'learnable':
 			arange = torch.arange(T, device=seq.device)
 			pos_emb = self.stack.pos_embs(arange)
 
 		x = x + pos_emb if self.pos_method != 'rope' else x
 
-		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(seq.device)
+		freqs_cis = None if self.pos_method != 'rope' else self.freqs_cis[:T].to(config.device)
 
 		y = None
 		for i, block in enumerate(self.blocks):
@@ -519,6 +519,7 @@ class GAT(torch.nn.Module):
 		x = self.gat1(x, edge_index, edge_attr=edge_attr)
 		x = F.silu(x)
 		x = F.dropout(x, p=config.dropout, training=self.training)
+		print(x.shape)
 		x = self.ln1(x)
 		x = self.gat2(x, edge_index, edge_attr=edge_attr)
 
