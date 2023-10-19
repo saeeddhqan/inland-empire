@@ -27,7 +27,7 @@ class Data:
 		self.encode = self.tokenizer.encode
 		self.decode = lambda seq: self.tokenizer.decode(seq, skip_special_tokens=True)
 
-		self.vocab_size = tokenizer.vocab_size
+		self.vocab_size = self.tokenizer.vocab_size
 		config.vocab_size = self.vocab_size
 
 
