@@ -305,7 +305,7 @@ class Block(nn.Module):
 
 		head_out, y = self.causal_self_attention(self.ln1(x), y, freqs_cis=freqs_cis)
 		head_out = x + head_out
-		hidden_state = head_out + self.ffn(self.ln2(head_out))
+		hidden_state = head_out + self.alpha * self.ffn(self.ln2(head_out))
 		return hidden_state, y
 
 
