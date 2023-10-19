@@ -278,7 +278,7 @@ class NonLinear(nn.Module):
 		self.slope = nn.Parameter(torch.tensor(data=0.0))
 
 	def forward(self, x: Tensor):
-		return self.dropout(self.w3(F.leaky_relu(self.w1(x), negative_slope=self.slope) * self.w2(x)))
+		return self.dropout(self.w3(F.leaky_relu(self.w1(x), negative_slope=self.slope.item()) * self.w2(x)))
 
 
 class Block(nn.Module):
