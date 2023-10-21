@@ -41,7 +41,7 @@ params = {
 	'nheads': 4,
 	'ngroups': 8,
 	'pos_win': 8,
-	'accumulation_steps': 1,
+	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'dropout_pos': 0.05,
 	'dim': dim,
@@ -75,7 +75,7 @@ params = {
 	'pos': 'rope', # rope, dynamic, learnable
 	'attention': 1,
 	'emb_dir': 'doc_graphs',
-	'emb_block_size': 32,
+	'emb_block_size': 128,
 	'causality': True,
 	'gnn_classes': 12,
 	'gnn_lr': 8e-4,
@@ -188,7 +188,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode', 'emb_block_size', 'gnn_epoch', 'gnn_classes')
+			'data_load', 'action', 'load', 'workdir', 'mode', 'emb_block_size', 'gnn_epoch', 'gnn_classes', 'loadgraph')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]
@@ -619,7 +619,7 @@ class ManageModel:
 		))
 
 
-	def graph_search(self, model_path: str, query: str, scorer: Optional[str] = 'dot'):
+	def graph_search(self, model_path: str, query: str, scorer: Optional[str] = 'dot', topk: int = 10):
 		'''
 			Given a message passing model path and a query, the model returns the 
 			most relevant documents to the query.
@@ -632,7 +632,11 @@ class ManageModel:
 		del checkpoint
 
 		self.GAT.eval()
-		encoded_query = torch.tensor(config.data_load.encode(query), dtype=torch.long).to(config.device)
+		encoded_query = torch.tensor(
+			config.data_load.tokenizer.encode('china', add_special_tokens=False),
+			dtype=torch.long,
+		).to(config.device)
+
 		get_graph = self.make_graph(encoded_query)
 		data_instance = torch_geometric.data.Data(**get_graph).to(config.device)
 		data_instance.validate()
@@ -643,10 +647,11 @@ class ManageModel:
 			if scorer == 'dot':
 				score = load_doc['aggregator'][0] @ representator[0]
 			else:
-				score = torch.cdist(load_doc['aggregator'][0], representator[0])
+				score = torch.cdist(load_doc['aggregator'], representator)[0].item()
 			scores.append((docid, score))
 		scores.sort(key=lambda x: x[1], reverse=True if scorer == 'dot' else False)
-		top = scores[:15]
+		top = scores[:topk]
+		print(top)
 		for result in top:
 			doc = config.data_load.get_doc(result[0])
 			decode = config.data_load.decode(doc.tolist())
@@ -709,7 +714,7 @@ if __name__ == '__main__':
 				config.query != ''
 			):
 				task.load_model(config.load)
-				task.graph_search(config.loadgraph, config.query)
+				task.graph_search(model_path=config.loadgraph, query=config.query, scorer='euclid', topk=3)
 			else:
 				print('Provide all the necessary options.')
 		case _:

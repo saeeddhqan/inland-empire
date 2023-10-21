@@ -490,15 +490,14 @@ class GAT(torch.nn.Module):
 	def __init__(self):
 		super().__init__()
 		self.dim = config.dim
-		self.nheads = config.nheads
+		self.nheads = 2
 		self.hidden_size = self.dim * 2
-		self.gat1 = GATv2Conv(self.dim, self.hidden_size, heads=self.nheads, edge_dim=1)
+		self.gat1 = GATv2Conv(self.dim, self.dim * self.nheads, heads=self.nheads, edge_dim=1)
 		self.gat2 = GATv2Conv(self.hidden_size * self.nheads, self.dim // 2, heads=self.nheads, edge_dim=1)
 
 		self.linear = nn.Linear(self.dim, config.gnn_classes, bias=False)
 		self.emb_linear = nn.Linear(self.dim, self.dim)
-
-		self.ln1 = RMSNorm(self.hidden_size * 2)
+		self.ln1 = RMSNorm(self.hidden_size * self.nheads)
 		self.ln2 = RMSNorm(self.dim)
 		self.ln3 = RMSNorm(self.dim)
 		self.apply(self.norm_weights)
@@ -522,10 +521,8 @@ class GAT(torch.nn.Module):
 		x = self.gat1(x, edge_index, edge_attr=edge_attr)
 		x = F.silu(x)
 		x = F.dropout(x, p=config.dropout, training=self.training)
-		print(x.shape)
 		x = self.ln1(x)
 		x = self.gat2(x, edge_index, edge_attr=edge_attr)
-
 		# Readout layer
 		if inference:
 			pool = global_mean_pool(x, None)
