@@ -8,7 +8,8 @@ import torch
 from torch import Tensor, nn
 from torch.utils.tensorboard import SummaryWriter
 import wandb, argparse, time, random, math, numpy, re
-import emb as model
+import model
+import torch_geometric
 from contextlib import nullcontext
 from typing import Union, Optional, Iterable, Any, NoReturn, ClassVar
 
@@ -40,7 +41,7 @@ params = {
 	'nheads': 4,
 	'ngroups': 8,
 	'pos_win': 8,
-	'accumulation_steps': 1,
+	'accumulation_steps': 2,
 	'dropout': 0.1,
 	'dropout_pos': 0.05,
 	'dim': dim,
@@ -50,8 +51,11 @@ params = {
 	'device': 'cuda' if torch.cuda.is_available() else 'cpu',
 	'variation': '', # When we change something, change this to distinguish different variations.
 	'workdir': 'workdir',
-	'data_file': 'data/pol_clean.txt',
+	'data_file': 'data/politic50k',
+	'docs_file': 'data/politic4k.pt',
 	'load': '',
+	'loadgraph': '',
+	'query': '',
 	'action': 'train',
 	'mode': 'train',
 	'data_load': None,
@@ -68,8 +72,14 @@ params = {
 	'deepnorm': False,
 	'init_weight': 'xavier',
 	'topk': -1,
-	'pos': 'learnable', # rope, dynamic, learnable
+	'pos': 'rope', # rope, dynamic, learnable
 	'attention': 1,
+	'emb_dir': 'doc_graphs',
+	'emb_block_size': 128,
+	'causality': True,
+	'gnn_classes': 12,
+	'gnn_lr': 8e-4,
+	'gnn_epoch': 5,
 }
 
 
@@ -178,7 +188,7 @@ class Config:
 		'''
 
 		filters = (
-			'data_load', 'action', 'load', 'workdir', 'mode')
+			'data_load', 'action', 'load', 'workdir', 'mode', 'emb_block_size', 'gnn_epoch', 'gnn_classes', 'loadgraph')
 		for k in params:
 			if k not in filters:
 				self.__data_dict__[k] = params[k]
@@ -302,6 +312,7 @@ class ManageModel:
 			self.wandb_init.watch(self.model, log='all')
 
 		os.makedirs(config.workdir, exist_ok=True)
+		os.makedirs(config.emb_dir, exist_ok=True)
 		self.scaler = torch.cuda.amp.GradScaler(enabled=(config.dtype == 'float16'))
 
 
@@ -362,9 +373,9 @@ class ManageModel:
 			# A tensor to capture the losses
 			losses = torch.zeros(config.eval_iterations)
 			for k in range(config.eval_iterations):
-				X, y = config.data_load.get_batch(0, split, block_size=length)
+				X, Y = config.data_load.get_batch(0, split, block_size=length)
 				with config.autocast:
-					_, loss = self.model(X, y)
+					_, loss = self.model(X, Y)
 				losses[k] = loss.item()
 			out[split] = losses.mean()
 
@@ -451,7 +462,6 @@ class ManageModel:
 
 			# If it's the right time to test the model
 			if epoch % config.eval_step == config.eval_step - 1:
-				config.mode = 'inference'
 				self.test(epoch)
 				if config.save_checkpoint or self.loss['test'] < self.best_loss:
 					self.best_loss = self.loss['test']
@@ -463,7 +473,7 @@ class ManageModel:
 						'test_loss': self.loss['test'],
 						'epoch': epoch,
 						}, self.path_format + f"_{epoch}.pt")
-				config.mode = 'train'
+
 			epoch += 1
 
 			if epoch > config.iterations:
@@ -505,6 +515,7 @@ class ManageModel:
 		'''
 		self.pre_test()
 
+
 		X, _ = config.data_load.get_batch(0, 'test', batch_size=1)
 
 		start = time.time()
@@ -520,6 +531,135 @@ class ManageModel:
 		return decoded, took, took_per_token
 
 
+	def make_graph(self, doc: Tensor) -> dict:
+		'''
+			Create a graph from a document with synthetic edges.
+		'''
+		# Create sequences and adjust their shapes
+		fix_batch = doc.size(0) // config.emb_block_size
+
+		if doc.size(0) <= config.emb_block_size:
+			full_batch = doc.view(1, -1)
+			remain_context = 0
+		else:
+			fix_context = (fix_batch * config.emb_block_size)
+			remain_context = doc.size(0) - fix_context
+			full_batch = doc[:fix_context].view(fix_batch, -1)
+			remain_batch = doc[fix_context:].view(1, -1)
+
+		# Create embeddings for all sequences and concatenate the embeddings.
+		config.causality = True
+		full_embs = self.model(full_batch, get_embs=True)
+		if remain_context > 0:
+			remain_embs = self.model(remain_batch, get_embs=True)
+			full_embs = torch.cat((full_embs, remain_embs), dim=1)
+		config.causality = False
+
+		# A round of communication. Not sure.
+		nodes = self.model.forward_node(full_embs) # context-aware chunks. NOTE:
+		# Score function to compute the similarity between nodes
+		euclidean_distances = torch.cdist(nodes, nodes)
+		# Normalizing edge weights so that the larger, the more similar two nodes are.
+		edges_norm = (1 - euclidean_distances / euclidean_distances.max(dim=2)[0].mT)[0]
+		# Proning some of the edges that their score is below than mean.
+		thresholds = edges_norm.mean(dim=0)
+		num_nodes = nodes.size(1)
+
+		# Create edge list, edge attr, and y
+		edge_list = [[], []]
+		edge_attr = []
+		y = torch.arange(0, num_nodes)
+		if num_nodes > config.gnn_classes:
+			y[torch.where(y >= config.gnn_classes)[0]] = config.gnn_classes - 1
+
+		for i in range(num_nodes):
+			mean = thresholds[i]
+			for j in range(num_nodes):
+				distance = edges_norm[i, j]
+				if distance > mean and distance != 1: # removing self-edges
+					edge_list[0].append(i)
+					edge_list[1].append(j)
+					edge_attr.append([distance])
+
+		graph = {'x': nodes[0],
+			'edge_index': torch.tensor(edge_list, dtype=torch.long),
+			'edge_attr': torch.tensor(edge_attr),
+			'y': y,
+		}
+
+		return graph
+
+
+	def graph_generator(self) -> NoReturn:
+		'''
+			Iterate over all the documents, convert them into graph,
+			, create an embedding for each graph and save it.
+		'''
+		self.pre_test()
+		self.GAT = model.GAT().to(config.device)
+		self.GAT.require()
+		for docid in range(config.data_load.num_docs):
+			doc = config.data_load.get_doc(docid)
+			graph = self.make_graph(doc)
+			data_instance = torch_geometric.data.Data(**graph).to(config.device)
+			data_instance.validate()
+			# Message passing
+			self.GAT.train_process(data_instance, docid)
+			# Create the final representator.
+			aggregator = self.GAT.generate_aggregator(data_instance)
+			graph['aggregator'] = aggregator
+			graph['graph_id'] = docid
+			torch.save(graph, f'{config.emb_dir}/doc_{docid}.pt')
+		
+		torch.save({
+			'model': self.GAT.state_dict()
+		}, os.path.join(
+			config.workdir,
+			'model_GAT.pt',
+		))
+
+
+	def graph_search(self, model_path: str, query: str, scorer: Optional[str] = 'dot', topk: int = 10):
+		'''
+			Given a message passing model path and a query, the model returns the 
+			most relevant documents to the query.
+		'''
+		self.pre_test()
+		checkpoint = torch.load(model_path)
+		self.GAT = model.GAT()
+		self.GAT.load_state_dict(checkpoint['model'])
+		self.GAT.to(config.device)
+		del checkpoint
+
+		self.GAT.eval()
+		encoded_query = torch.tensor(
+			config.data_load.tokenizer.encode('china', add_special_tokens=False),
+			dtype=torch.long,
+		).to(config.device)
+
+		get_graph = self.make_graph(encoded_query)
+		data_instance = torch_geometric.data.Data(**get_graph).to(config.device)
+		data_instance.validate()
+		representator = self.GAT.generate_aggregator(data_instance)
+		scores = []
+		for docid in range(config.data_load.num_docs):
+			load_doc = torch.load(f'{config.emb_dir}/doc_{docid}.pt')
+			if scorer == 'dot':
+				score = load_doc['aggregator'][0] @ representator[0]
+			else:
+				score = torch.cdist(load_doc['aggregator'], representator)[0].item()
+			scores.append((docid, score))
+		scores.sort(key=lambda x: x[1], reverse=True if scorer == 'dot' else False)
+		top = scores[:topk]
+		print(top)
+		for result in top:
+			doc = config.data_load.get_doc(result[0])
+			decode = config.data_load.decode(doc.tolist())
+			print(f"DOC ID: {result[0]}")
+			print('-'*10)
+			print(decode)
+			print('-'*40)
+
 if __name__ == '__main__':
 	config = Config(params)
 	parser = argparse.ArgumentParser()
@@ -527,6 +667,8 @@ if __name__ == '__main__':
 	parser.add_argument('--device', type=str, default=config.device, help=f"device type, default {config.device}")
 	parser.add_argument('--workdir', type=str, default=config.workdir, help=f"directory to save models, default {config.device}")
 	parser.add_argument('--load', type=str, default=config.load, help='path to a model to start with')
+	parser.add_argument('--loadgraph', type=str, default=config.loadgraph, help='path to the message passing model')
+	parser.add_argument('--query', type=str, default=config.query, help='search query')
 	parser.add_argument('--data-file', type=str, default=config.data_file, help=f"input data file, default {config.data_file}")
 	parser.add_argument('--variation', '-v', type=str, default=config.variation, help=f"model variation, default {config.variation}")
 	parser.add_argument('--details', type=str, help=f"model details, default {config.details}")
@@ -561,13 +703,19 @@ if __name__ == '__main__':
 				model = model.Transformer()
 				task.model = torch.compile(model) if config.compile else model
 			task.train()
-		case 'test':
+		case 'generate':
 			config.mode = 'inference'
 			task.load_model(config.load)
-			seq, elapsed, elapsed_per_token = task.generator(500)
-			print(seq)
-			print('-' * 12)
-			print('Elapsed:', elapsed)
-			print('Elapsed per character:', elapsed_per_token)
+			task.graph_generator()
+		case 'inference':
+			config.mode = 'inference'
+			if (config.load != '' and \
+				config.loadgraph != '' and \
+				config.query != ''
+			):
+				task.load_model(config.load)
+				task.graph_search(model_path=config.loadgraph, query=config.query, scorer='euclid', topk=3)
+			else:
+				print('Provide all the necessary options.')
 		case _:
 			print('Invalid action.')
